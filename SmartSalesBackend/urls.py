@@ -32,6 +32,16 @@ urlpatterns = [
     path('api/auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 
     # Aquí montaremos rutas de tus apps, p. ej.:
+    # Conecta las URLs de 'accounts' (como el registro)
+    path('api/auth/', include('apps.accounts.urls')),
     # path('api/catalog/', include('apps.catalog.urls')),
+    
+    path('api/catalog/',include('apps.catalog.urls')),
+    path('api/customers/', include('apps.customers.urls')),
+    path('api/cart/', include('apps.cart.urls')),
+    path('api/sales/', include('apps.sales.urls')),
+    path('api/marketing/', include('apps.marketing.urls')),
+    path('api/security/', include('apps.security.urls')),
+    path('api/reporting/', include('apps.reporting.urls')),
 ]
 

@@ -19,6 +19,8 @@ SECRET_KEY = config('SECRET_KEY', default='CHANGE_ME')
 DEBUG = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='127.0.0.1,localhost', cast=Csv())
 
+AUTH_USER_MODEL = 'accounts.User'
+
 # --- Apps instaladas ---
 INSTALLED_APPS = [
     # Django
@@ -37,6 +39,14 @@ INSTALLED_APPS = [
 
     # apps que vamos creando para el proyecto
 
+    'apps.accounts',
+    'apps.catalog',
+    'apps.customers',
+    'apps.cart',
+    'apps.sales',
+    'apps.marketing',
+    'apps.security',
+    'apps.reporting',
 ]
 
 # --- Middleware (CORS debe ir arriba del common) ---
@@ -47,6 +57,9 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    
+    'apps.security.middleware.AuditMiddleware',
+    
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -112,7 +125,7 @@ REST_FRAMEWORK = {
     ),
     # mientras empiezas, si quieres que endpoints anónimos funcionen, cambia a AllowAny
     'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',
+        'rest_framework.permissions.AllowAny',
     ),
     'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
