@@ -1,205 +1,156 @@
-# apps/sales/views.py
-
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from django.db import transaction
 from django.utils import timezone
 
-# --- Imports de Rest Framework ---
-from rest_framework import status
-from rest_framework.decorators import action
+from rest_framework.viewsets import ModelViewSet
 from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
 from rest_framework.response import Response
-from rest_framework.viewsets import ReadOnlyModelViewSet
+from rest_framework import serializers as drf_serializers
 
-# --- Imports de otras Apps ---
-from apps.cart.models import Carrito, DetalleCarrito
+from .models import Venta, DetalleVenta, Factura, Pago
 from apps.catalog.models import Producto
-from apps.customers.models import Cliente
 
-# --- Imports Locales (esta app) ---
-from .models import Venta, DetalleVenta, Pago, Factura
-from .serializers import VentaSerializer, FacturaSerializer, PagoSerializer
+# Intentar importar serializers desde apps/sales/serializers.py, si no existen creamos fallbacks seguros
+try:
+    from .serializers import VentaSerializer, FacturaSerializer, PagoSerializer, DetalleVentaSerializer
+except Exception:
+    # Fallback mínimo para evitar ImportError en runtime. Recomendado: crear serializers reales en apps/sales/serializers.py
+    class DetalleVentaSerializer(drf_serializers.ModelSerializer):
+        class Meta:
+            model = DetalleVenta
+            fields = '__all__'
 
-# -----------------------------------------------------------------
+    class VentaSerializer(drf_serializers.ModelSerializer):
+        detalles = DetalleVentaSerializer(many=True, read_only=True)
+        class Meta:
+            model = Venta
+            fields = '__all__'
 
-class VentaViewSet(ReadOnlyModelViewSet):
+    class FacturaSerializer(drf_serializers.ModelSerializer):
+        class Meta:
+            model = Factura
+            fields = '__all__'
+
+    class PagoSerializer(drf_serializers.ModelSerializer):
+        class Meta:
+            model = Pago
+            fields = '__all__'
+
+
+class VentaViewSet(ModelViewSet):
     """
-    Listado y detalle de ventas.
-    Admins ven todo, usuarios ven solo sus ventas.
-    Incluye la acción de 'checkout'.
+    ModelViewSet para Ventas. create():
+    - valida existencia y stock de productos
+    - crea la Venta y los DetalleVenta
+    - actualiza stock (select_for_update)
+    - crea factura asociada (simple)
     """
-    permission_classes = [IsAuthenticated]
+    queryset = Venta.objects.all().order_by('-fecha_venta')
     serializer_class = VentaSerializer
+    permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        """
-        Optimizado para incluir cliente, usuario, pago, factura y detalles
-        en el menor número de consultas.
-        """
-        user = self.request.user
-        
-        # --- MEJORA DE OPTIMIZACIÓN APLICADA ---
-        # Añadimos 'cliente__user', 'pago', y 'factura' al select_related
-        qs = Venta.objects.select_related(
-            'cliente', 'cliente__user', 'pago', 'factura'
-        ).prefetch_related(
-            'detalles__producto'
-        )
-
-        if user.is_staff or user.is_superuser:
-            return qs.order_by('-id')
-        try:
-            # Asumimos que un usuario no-staff es un cliente
-            cliente = user.cliente
-        except Cliente.DoesNotExist:
-            # Si el usuario no es staff y no tiene perfil de cliente, no ve nada
-            return Venta.objects.none()
-            
-        return qs.filter(cliente=cliente).order_by('-id')
-
-    @action(detail=False, methods=['post'], url_path='checkout')
     @transaction.atomic
-    def checkout(self, request):
-        """
-        Crea una Venta, Pago y Factura a partir del carrito activo del cliente.
-        Valida el stock y descuenta las unidades.
-        Limpia el carrito al finalizar.
+    def create(self, request, *args, **kwargs):
+        data = request.data
+        items = data.get('items') or []
+        cliente_id = data.get('cliente')
+        metodo_pago = data.get('metodo_pago', 'tarjeta')
 
-        Espera:
-        {
-          "metodo_pago": "tarjeta",
-          "descuento": "0.00",
-          "referencia_transaccion": "opcional"
-        }
-        """
-        # --- (Tu lógica de checkout es excelente y se mantiene intacta) ---
-        user = request.user
-        try:
-            cliente = user.cliente
-        except Cliente.DoesNotExist:
-            return Response({"detail": "Este usuario no tiene perfil de cliente."}, status=status.HTTP_400_BAD_REQUEST)
+        if not cliente_id:
+            return Response({"detail": "cliente es requerido"}, status=status.HTTP_400_BAD_REQUEST)
+        if not items:
+            return Response({"detail": "items es requerido"}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            carrito = Carrito.objects.select_for_update().get(cliente=cliente, estado='activo')
-        except Carrito.DoesNotExist:
-            return Response({"detail": "No hay carrito activo."}, status=status.HTTP_400_BAD_REQUEST)
+        subtotal = Decimal('0.00')
+        detalles_info = []
 
-        detalles = list(DetalleCarrito.objects.select_for_update().filter(carrito=carrito).select_related('producto'))
-        if not detalles:
-            return Response({"detail": "El carrito está vacío."}, status=status.HTTP_400_BAD_REQUEST)
+        for it in items:
+            prod_id = it.get('producto')
+            if prod_id is None:
+                return Response({"detail": "Cada item debe contener 'producto'."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validar stock
-        for d in detalles:
-            if d.producto.stock < d.cantidad:
-                return Response({"detail": f"Stock insuficiente para {d.producto.nombre}."}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                prod = Producto.objects.select_for_update().get(pk=prod_id)
+            except Producto.DoesNotExist:
+                return Response({"detail": f"Producto {prod_id} no encontrado."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Calcular totales
-        subtotal = sum((d.cantidad * d.precio_unitario for d in detalles), Decimal('0.00'))
-        descuento = Decimal(request.data.get('descuento', '0.00'))
-        total = subtotal - descuento
-        if total < 0:
-            total = Decimal('0.00')
+            try:
+                qty = int(it.get('cantidad', 1))
+                if qty <= 0:
+                    raise ValueError
+            except (ValueError, TypeError):
+                return Response({"detail": f"cantidad inválida para producto {prod_id}."}, status=status.HTTP_400_BAD_REQUEST)
 
-        metodo_pago = request.data.get('metodo_pago', 'tarjeta')
-        referencia = request.data.get('referencia_transaccion', '')
+            try:
+                precio_unitario = Decimal(str(it.get('precio_unitario', prod.precio)))
+                if precio_unitario < 0:
+                    raise InvalidOperation
+            except (InvalidOperation, ValueError, TypeError):
+                return Response({"detail": f"precio_unitario inválido para producto {prod_id}."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Crear venta
+            if hasattr(prod, 'stock') and prod.stock is not None and prod.stock < qty:
+                return Response({"detail": f"Stock insuficiente para producto {prod.id}."}, status=status.HTTP_400_BAD_REQUEST)
+
+            total_line = precio_unitario * qty
+            subtotal += total_line
+            detalles_info.append({
+                'producto': prod,
+                'cantidad': qty,
+                'precio_unitario': precio_unitario,
+                'total_line': total_line,
+            })
+
         venta = Venta.objects.create(
-            cliente=cliente,
+            cliente_id=cliente_id,
             fecha_venta=timezone.now(),
             metodo_pago=metodo_pago,
-            total=total,
+            total=subtotal,
             estado_venta='completada'
         )
 
-        # Crear detalles y descontar stock
-        for d in detalles:
+        for info in detalles_info:
             DetalleVenta.objects.create(
                 venta=venta,
-                producto=d.producto,
-                cantidad=d.cantidad,
-                precio_unitario=d.precio_unitario,
-                total=d.cantidad * d.precio_unitario
+                producto=info['producto'],
+                cantidad=info['cantidad'],
+                precio_unitario=info['precio_unitario'],
+                total=info['total_line']
             )
-            # descontar stock
-            p = d.producto
-            p.stock -= d.cantidad
-            p.save(update_fields=['stock'])
+            prod = info['producto']
+            if hasattr(prod, 'stock') and prod.stock is not None:
+                prod.stock = max(0, prod.stock - info['cantidad'])
+                prod.save(update_fields=['stock'])
 
-        # Pago
-        pago = Pago.objects.create(
-            venta=venta,
-            metodo=metodo_pago,
-            monto=total,
-            estado_pago='exitoso',
-            referencia_transaccion=referencia
-        )
-
-        # Factura
-        numero = f"F-{venta.pk:06d}"
-        factura = Factura.objects.create(
+        numero = f"F-{timezone.now().strftime('%Y%m%d')}-{venta.pk}"
+        Factura.objects.create(
             venta=venta,
             numero_factura=numero,
+            fecha_emision=timezone.now(),
             subtotal=subtotal,
-            descuento=descuento,
-            total=total,
-            metodo_pago=metodo_pago,
+            descuento=Decimal('0.00'),
+            total=subtotal,
+            metodo_pago=venta.metodo_pago,
             estado='emitida'
         )
 
-        # Cerrar carrito y limpiar detalles
-        carrito.estado = 'cerrado'
-        carrito.save(update_fields=['estado'])
-        carrito.detalles.all().delete()
-
-        data = {
-            "venta": VentaSerializer(venta).data,
-            "pago": PagoSerializer(pago).data,
-            "factura": FacturaSerializer(factura).data
-        }
-        return Response(data, status=status.HTTP_201_CREATED)
+        serializer = VentaSerializer(venta, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
-# --- VISTAS ADICIONALES (READ-ONLY) AÑADIDAS ---
-
-class PagoViewSet(ReadOnlyModelViewSet):
+class FacturaViewSet(ModelViewSet):
     """
-    Endpoint de solo lectura para Pagos.
-    Admins ven todo, usuarios ven solo sus pagos.
+    ViewSet para Facturas.
     """
-    permission_classes = [IsAuthenticated]
-    serializer_class = PagoSerializer
-    
-    def get_queryset(self):
-        user = self.request.user
-        qs = Pago.objects.select_related('venta', 'venta__cliente__user')
-        if user.is_staff:
-            return qs.order_by('-id')
-        
-        try:
-            cliente = user.cliente
-        except Cliente.DoesNotExist:
-            return Pago.objects.none()
-            
-        return qs.filter(venta__cliente=cliente).order_by('-id')
-
-class FacturaViewSet(ReadOnlyModelViewSet):
-    """
-    Endpoint de solo lectura para Facturas.
-    Admins ven todo, usuarios ven solo sus facturas.
-    """
-    permission_classes = [IsAuthenticated]
+    queryset = Factura.objects.all().order_by('-fecha_emision')
     serializer_class = FacturaSerializer
-    
-    def get_queryset(self):
-        user = self.request.user
-        qs = Factura.objects.select_related('venta', 'venta__cliente__user')
-        if user.is_staff:
-            return qs.order_by('-id')
+    permission_classes = [IsAuthenticated]
 
-        try:
-            cliente = user.cliente
-        except Cliente.DoesNotExist:
-            return Factura.objects.none()
 
-        return qs.filter(venta__cliente=cliente).order_by('-id')
+class PagoViewSet(ModelViewSet):
+    """
+    ViewSet para Pagos.
+    """
+    queryset = Pago.objects.all().order_by('-fecha_pago')
+    serializer_class = PagoSerializer
+    permission_classes = [IsAuthenticated]
