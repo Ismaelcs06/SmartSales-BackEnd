@@ -15,7 +15,11 @@ class Producto(models.Model):
     modelo = models.CharField(max_length=80, blank=True)
     precio = models.DecimalField(max_digits=10, decimal_places=2)
     stock = models.IntegerField(default=0)
-    imagen_url = models.CharField(max_length=255, blank=True)
+    imagen = models.ImageField(upload_to='productos/', null=True, blank=True)
+    
+    # (Renombramos 'imagen_url' a 'imagen' para más claridad)
+    # --- FIN DEL CAMBIO ---
+    
     estado = models.CharField(max_length=20, default='activo')
     fecha_registro = models.DateTimeField(auto_now_add=True)
     def __str__(self): return self.nombre

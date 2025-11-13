@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 from pathlib import Path
 from decouple import config, Csv
+from datetime import timedelta  # <-- CORRECCIÓN 1: Añadido
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -23,21 +24,22 @@ AUTH_USER_MODEL = 'accounts.User'
 
 # --- Apps instaladas ---
 INSTALLED_APPS = [
-    # Django
+     # Django
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-
-    # Complementarios 
+     # Complementarios 
     'rest_framework',
+    'rest_framework_simplejwt',  # <-- CORRECCIÓN 2: Añadido
+    'rest_framework_simplejwt.token_blacklist', # <-- CORRECCIÓN 3: Añadido
     'django_filters',
     'drf_spectacular',
     'corsheaders',
 
-    # apps que vamos creando para el proyecto
+     # apps que vamos creando para el proyecto
 
     'apps.accounts',
     'apps.catalog',
@@ -57,9 +59,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    
     'apps.security.middleware.AuditMiddleware',
-    
+
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -85,7 +86,7 @@ WSGI_APPLICATION = 'SmartSalesBackend.wsgi.application'
 
 # --- Base de datos (PostgreSQL desde .env) ---
 DATABASES = {
-    'default': {
+        'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': config('PG_NAME'),
         'USER': config('PG_USER'),
@@ -119,18 +120,39 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # --- DRF + JWT + Filters ---
 REST_FRAMEWORK = {
-    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
-    'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ),
-    # mientras empiezas, si quieres que endpoints anónimos funcionen, cambia a AllowAny
-    'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.AllowAny',
-    ),
-    'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 20,
+ 'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+ 'DEFAULT_AUTHENTICATION_CLASSES': (
+ 'rest_framework_simplejwt.authentication.JWTAuthentication',
+ ),
+'DEFAULT_PERMISSION_CLASSES': (
+ 'rest_framework.permissions.AllowAny',
+ ),
+'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
+'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+'PAGE_SIZE': 20,
 }
+
+# --- CORRECCIÓN 4: Añadida la configuración de Simple JWT ---
+SIMPLE_JWT = {
+    # Tiempos de vida (5 min para acceso, 1 día para refresco)
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=5),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+    
+    # Rotación de tokens (mejora la seguridad)
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True, # Invalida el token de refresco anterior
+
+    # Configuración de Cabeceras
+    "AUTH_HEADER_TYPES": ("Bearer",), # Acepta "Bearer <token>"
+    "AUTH_HEADER_NAME": "HTTP_AUTHORIZATION",
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
+
+    # Algoritmo
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY, # Usa la SECRET_KEY principal
+}
+
 
 # --- OpenAPI / Swagger ---
 SPECTACULAR_SETTINGS = {
@@ -143,3 +165,9 @@ SPECTACULAR_SETTINGS = {
 CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', cast=Csv(), default='http://localhost:3000')
 CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=False, cast=bool)
 CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', cast=Csv(), default='')
+
+# --- ¡AÑADIR ESTAS LÍNEAS! ---
+# Define la URL base para acceder a los archivos subidos (ej. /media/productos/mi-foto.jpg)
+MEDIA_URL = '/media/'
+# Define la carpeta en tu disco duro donde se guardarán los archivos
+MEDIA_ROOT = BASE_DIR / 'media'
